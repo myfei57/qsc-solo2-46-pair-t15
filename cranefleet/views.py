@@ -118,6 +118,26 @@ def limit_view(console: "Console") -> dict[str, object]:
         "stopped": {axis: limit.is_stopped(axis) for axis in axes},
         "latch": limit.is_latched(),
         "generation": limit.generation_now(),
+        "active_profile": limit_module.active_profile(limit),
+        "switching": limit_module.is_switching(limit),
+        "switch_sequence": limit_module.switch_sequence_now(limit),
+    }
+
+
+def limit_profiles_view(console: "Console") -> dict[str, object]:
+    """The defined work-zone profiles, the active one and the switch trail."""
+
+    limit = console.limit
+    profiles = limit_module.profiles_snapshot(limit)
+    return {
+        "active": limit_module.active_profile(limit),
+        "switching": limit_module.is_switching(limit),
+        "switch_sequence": limit_module.switch_sequence_now(limit),
+        "profiles": {
+            name: {axis: [span[0], span[1]] for axis, span in ranges.items()}
+            for name, ranges in profiles.items()
+        },
+        "switches": [switch.to_dict() for switch in limit_module.switch_history(limit)],
     }
 
 
@@ -215,6 +235,7 @@ __all__ = [
     "cluster_view",
     "crane_view",
     "hoist_view",
+    "limit_profiles_view",
     "limit_view",
     "load_view",
     "nearest_pair_view",

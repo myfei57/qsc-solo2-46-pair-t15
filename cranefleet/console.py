@@ -26,10 +26,14 @@ from .cluster import Cluster
 from .config import ConfigError, SiteConfig
 from .crane import Crane
 from .errors import (
+    AxesMoving,
     CraneFleetError,
     FeedbackNotConfirmed,
     HoistBusy,
     HookNotLowered,
+    LimitProfileInvalid,
+    LimitProfileUnknown,
+    LimitSwitchBusy,
     SlewBlocked,
     SlewBusy,
     SlewIdle,
@@ -142,6 +146,9 @@ class Console:
             ("POST", "/api/hoist/stop"): self.handle_hoist_stop,
             ("GET", "/api/limit/state"): self.handle_limit_state,
             ("POST", "/api/limit/check"): self.handle_limit_check,
+            ("GET", "/api/limit/profiles"): self.handle_limit_profiles,
+            ("POST", "/api/limit/profile"): self.handle_limit_profile_define,
+            ("POST", "/api/limit/activate"): self.handle_limit_activate,
             ("GET", "/api/config"): self.handle_config,
             ("POST", "/api/config"): self.handle_config_save,
             ("GET", "/api/audit"): self.handle_audit,
@@ -249,6 +256,8 @@ class Console:
     def handle_slew_start(self, request: Request) -> tuple[int, dict[str, Any]]:
         if zone_module.is_latched(self.zone):
             return 409, fail("zone latch held")
+        if limit_module.is_switching(self.limit):
+            return 409, fail("limit profile switch in progress")
         try:
             slew_module.start(self.slew, self.zone, self.store, self.audit)
         except ZoneNotDurable:
@@ -309,6 +318,11 @@ class Console:
         if crane is None:
             return 404, fail("crane not found")
         command = crane_module.Command.from_dict(request.body)
+        if (
+            command.action != crane_module.ACTION_STOP
+            and limit_module.is_switching(self.limit)
+        ):
+            return 409, fail("limit profile switch in progress")
         if command.source == crane_module.SOURCE_REMOTE:
             crane_module.apply_remote(crane, command)
         else:
@@ -417,21 +431,14 @@ class Console:
 
     def handle_limit_check(self, request: Request) -> tuple[int, dict[str, Any]]:
         positions = fleet.current_positions(self.cluster)
-        envelopes: list[limit_module.Envelope] = []
+        readers: dict[str, Callable[[], float]] = {}
         slew_point = positions.get("crane-1")
         trolley_point = positions.get("crane-2")
         if slew_point is not None:
-            envelopes.append(
-                limit_module.position_envelope(
-                    limit_module.AXIS_SLEW, limit_module.slew_position(slew_point.x)
-                )
-            )
+            readers[limit_module.AXIS_SLEW] = limit_module.slew_position(slew_point.x)
         if trolley_point is not None:
-            envelopes.append(
-                limit_module.position_envelope(
-                    limit_module.AXIS_TROLLEY, limit_module.trolley_position(trolley_point.y)
-                )
-            )
+            readers[limit_module.AXIS_TROLLEY] = limit_module.trolley_position(trolley_point.y)
+        envelopes = limit_module.active_envelopes(self.limit, readers)
         exceeded = limit_module.enforce_envelopes(self.limit, envelopes)
         arbitration: limit_module.Arbitration | None = None
         if exceeded:
@@ -443,9 +450,55 @@ class Console:
             {
                 "exceeded": exceeded,
                 "margins": limit_module.envelope_margins(envelopes),
+                "profile": limit_module.active_profile(self.limit),
                 "limit": views.limit_view(self),
                 "arbitration": arbitration.to_dict() if arbitration else None,
             }
+        )
+
+    def handle_limit_profiles(self, request: Request) -> tuple[int, dict[str, Any]]:
+        return 200, ok(views.limit_profiles_view(self))
+
+    def handle_limit_profile_define(self, request: Request) -> tuple[int, dict[str, Any]]:
+        if not request.body_valid:
+            return 400, fail("bad request")
+        try:
+            limit_module.define_profile(
+                self.limit,
+                str(request.body.get("name") or ""),
+                request.body.get("ranges"),
+                self.audit,
+            )
+        except LimitProfileInvalid as exc:
+            return 400, fail(str(exc))
+        try:
+            limit_module.persist_limit(self.limit, self.store)
+        except StoreError as exc:
+            return 500, fail(str(exc))
+        return 200, ok(views.limit_profiles_view(self))
+
+    def handle_limit_activate(self, request: Request) -> tuple[int, dict[str, Any]]:
+        if not request.body_valid:
+            return 400, fail("bad request")
+        name = str(request.body.get("name") or "")
+        if not name:
+            return 400, fail("name required")
+        try:
+            switch = limit_module.activate_profile(
+                self.limit, name, self.slew, self.trolley, self.hoist, self.audit
+            )
+        except LimitProfileUnknown:
+            return 404, fail("limit profile not found")
+        except LimitSwitchBusy:
+            return 409, fail("limit profile switch already in progress")
+        except AxesMoving:
+            return 409, fail("axes moving: stand still before switching limit profiles")
+        try:
+            limit_module.persist_limit(self.limit, self.store)
+        except StoreError as exc:
+            return 500, fail(str(exc))
+        return 200, ok(
+            {"switch": switch.to_dict(), "limit": views.limit_profiles_view(self)}
         )
 
     # ---------------------------------------------------------------- console

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import cluster as fleet
 from . import config as site_config
+from . import limit as limit_module
 from . import slew as slew_module
 from . import zone as zone_module
 from .audit import Audit, AuditEntry
@@ -77,6 +78,7 @@ def build_app(data_dir: str = "data", web_root: str = "web") -> App:
     hoist = Hoist("crane-1")
     wind = Wind()
     limit = Limit()
+    limit_module.restore_limit(limit, store)
     audit = Audit(1000)
     restore_audit(store, audit)
     feedback = SpeedFeedback("crane-1")
