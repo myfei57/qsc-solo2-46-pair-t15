@@ -87,5 +87,17 @@ class StaleRelease(LimitError):
     """Raised when a stale generation tries to release the limit latch."""
 
 
+class InvalidProfile(LimitError):
+    """Raised when a limit profile payload is malformed or out of range."""
+
+
+class ProfileNotFound(LimitError):
+    """Raised when a limit profile id is not registered."""
+
+
+class ProfileSwitchBlocked(LimitError):
+    """Raised when a profile switch is attempted while an axis is moving."""
+
+
 class ConfigError(CraneFleetError):
     """Raised when a site configuration payload is invalid."""

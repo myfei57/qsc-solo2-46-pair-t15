@@ -113,11 +113,27 @@ def wind_view(console: "Console") -> dict[str, object]:
 def limit_view(console: "Console") -> dict[str, object]:
     limit = console.limit
     axes = (limit_module.AXIS_SLEW, limit_module.AXIS_TROLLEY, limit_module.AXIS_HOIST)
+    profile = limit_module.active_profile(console.profiles)
     return {
         "tripped": {axis: limit.is_tripped(axis) for axis in axes},
         "stopped": {axis: limit.is_stopped(axis) for axis in axes},
         "latch": limit.is_latched(),
         "generation": limit.generation_now(),
+        "active_profile": profile.profile_id if profile is not None else "",
+        "profile_name": profile.name if profile is not None else "",
+        "switch_count": limit_module.switch_count(console.profiles),
+    }
+
+
+def limit_profiles_view(console: "Console") -> dict[str, object]:
+    """The registered limit profiles and the active selection."""
+
+    return {
+        "active": limit_module.active_profile_id(console.profiles),
+        "switch_count": limit_module.switch_count(console.profiles),
+        "profiles": [
+            profile.to_dict() for profile in limit_module.profiles_snapshot(console.profiles)
+        ],
     }
 
 
@@ -215,6 +231,7 @@ __all__ = [
     "cluster_view",
     "crane_view",
     "hoist_view",
+    "limit_profiles_view",
     "limit_view",
     "load_view",
     "nearest_pair_view",

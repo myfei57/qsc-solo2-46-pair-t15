@@ -30,6 +30,9 @@ from .errors import (
     FeedbackNotConfirmed,
     HoistBusy,
     HookNotLowered,
+    InvalidProfile,
+    ProfileNotFound,
+    ProfileSwitchBlocked,
     SlewBlocked,
     SlewBusy,
     SlewIdle,
@@ -38,7 +41,7 @@ from .errors import (
     ZoneNotDurable,
 )
 from .hoist import Drum, Hoist
-from .limit import Limit
+from .limit import Limit, LimitProfiles
 from .slew import Ramp, Slew, SpeedFeedback
 from .store import Store
 from .trolley import Speedometer, Trolley
@@ -91,6 +94,7 @@ class Console:
         hoist: Hoist,
         wind: Wind,
         limit: Limit,
+        profiles: LimitProfiles,
         audit: Audit,
         cranes: dict[str, Crane],
         feedback: SpeedFeedback,
@@ -105,6 +109,7 @@ class Console:
         self.hoist = hoist
         self.wind = wind
         self.limit = limit
+        self.profiles = profiles
         self.audit = audit
         self.cranes = cranes
         self.feedback = feedback
@@ -142,6 +147,9 @@ class Console:
             ("POST", "/api/hoist/stop"): self.handle_hoist_stop,
             ("GET", "/api/limit/state"): self.handle_limit_state,
             ("POST", "/api/limit/check"): self.handle_limit_check,
+            ("GET", "/api/limit/profiles"): self.handle_limit_profiles,
+            ("POST", "/api/limit/profile"): self.handle_limit_profile_save,
+            ("POST", "/api/limit/activate"): self.handle_limit_activate,
             ("GET", "/api/config"): self.handle_config,
             ("POST", "/api/config"): self.handle_config_save,
             ("GET", "/api/audit"): self.handle_audit,
@@ -417,36 +425,86 @@ class Console:
 
     def handle_limit_check(self, request: Request) -> tuple[int, dict[str, Any]]:
         positions = fleet.current_positions(self.cluster)
-        envelopes: list[limit_module.Envelope] = []
+        readers: dict[str, Callable[[], float]] = {}
         slew_point = positions.get("crane-1")
         trolley_point = positions.get("crane-2")
         if slew_point is not None:
-            envelopes.append(
-                limit_module.position_envelope(
-                    limit_module.AXIS_SLEW, limit_module.slew_position(slew_point.x)
-                )
-            )
+            readers[limit_module.AXIS_SLEW] = limit_module.slew_position(slew_point.x)
         if trolley_point is not None:
-            envelopes.append(
-                limit_module.position_envelope(
-                    limit_module.AXIS_TROLLEY, limit_module.trolley_position(trolley_point.y)
-                )
+            readers[limit_module.AXIS_TROLLEY] = limit_module.trolley_position(trolley_point.y)
+        profile = limit_module.active_profile(self.profiles)
+        profile_id = profile.profile_id if profile is not None else ""
+        envelopes = limit_module.envelopes_for_profile(profile, readers)
+        arbitration = limit_module.enforce_and_stop(
+            self.limit, self.slew, self.trolley, self.hoist, envelopes, profile_id
+        )
+        exceeded = list(arbitration.axes) if arbitration is not None else []
+        if arbitration is not None:
+            self.audit.record(
+                "system",
+                "limit-group-stop",
+                f"axes={','.join(arbitration.axes)} seq={arbitration.sequence} profile={profile_id}",
             )
-        exceeded = limit_module.enforce_envelopes(self.limit, envelopes)
-        arbitration: limit_module.Arbitration | None = None
-        if exceeded:
-            arbitration = limit_module.arbitrate(
-                self.limit, self.slew, self.trolley, self.hoist
-            )
-            self.audit.record("system", "limit-enforce", "axes=" + ",".join(exceeded))
         return 200, ok(
             {
                 "exceeded": exceeded,
                 "margins": limit_module.envelope_margins(envelopes),
                 "limit": views.limit_view(self),
                 "arbitration": arbitration.to_dict() if arbitration else None,
+                "profile": profile_id,
             }
         )
+
+    def handle_limit_profiles(self, request: Request) -> tuple[int, dict[str, Any]]:
+        return 200, ok(views.limit_profiles_view(self))
+
+    def handle_limit_profile_save(self, request: Request) -> tuple[int, dict[str, Any]]:
+        if not request.body_valid:
+            return 400, fail("bad request")
+        try:
+            profile = limit_module.LimitProfile.from_dict(request.body)
+        except InvalidProfile as exc:
+            return 400, fail(str(exc))
+        limit_module.register_profile(self.profiles, profile)
+        try:
+            limit_module.persist_profiles(self.profiles, self.store)
+        except StoreError as exc:
+            return 500, fail(str(exc))
+        self.audit.record(
+            "system", "limit-profile-register", f"{profile.profile_id} {profile.name}"
+        )
+        return 200, ok(views.limit_profiles_view(self))
+
+    def handle_limit_activate(self, request: Request) -> tuple[int, dict[str, Any]]:
+        if not request.body_valid:
+            return 400, fail("bad request")
+        profile_id = str(request.body.get("profile") or "")
+        if not profile_id:
+            return 400, fail("profile required")
+        previous = limit_module.active_profile_id(self.profiles)
+        try:
+            limit_module.activate(self.profiles, profile_id, self._moving_axes)
+        except ProfileNotFound:
+            return 404, fail("limit profile not found")
+        except ProfileSwitchBlocked as exc:
+            self.audit.record("system", "limit-switch-blocked", str(exc))
+            return 409, fail(str(exc))
+        try:
+            limit_module.persist_profiles(self.profiles, self.store)
+        except StoreError as exc:
+            return 500, fail(str(exc))
+        self.audit.record("system", "limit-profile-switch", f"{previous}->{profile_id}")
+        return 200, ok(views.limit_profiles_view(self))
+
+    def _moving_axes(self) -> list[str]:
+        moving: list[str] = []
+        if self.slew.is_moving():
+            moving.append(limit_module.AXIS_SLEW)
+        if self.trolley.is_moving():
+            moving.append(limit_module.AXIS_TROLLEY)
+        if self.hoist.is_moving():
+            moving.append(limit_module.AXIS_HOIST)
+        return moving
 
     # ---------------------------------------------------------------- console
 

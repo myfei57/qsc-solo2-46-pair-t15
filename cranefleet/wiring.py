@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import cluster as fleet
 from . import config as site_config
+from . import limit as limit_module
 from . import slew as slew_module
 from . import zone as zone_module
 from .audit import Audit, AuditEntry
@@ -17,7 +18,7 @@ from .crane import Crane
 from .errors import StoreNotFound
 from .geometry import Point
 from .hoist import Hoist
-from .limit import Limit
+from .limit import AxisRange, Limit, LimitProfile, LimitProfiles
 from .slew import Slew, SpeedFeedback
 from .store import FileStore, MemoryStore, Store, decode_snapshot, encode_snapshot
 from .trolley import Trolley
@@ -56,6 +57,33 @@ def default_boundary() -> list[Point]:
     return [Point(-10.0, -10.0), Point(110.0, -10.0), Point(110.0, 110.0), Point(-10.0, 110.0)]
 
 
+def default_limit_profiles() -> LimitProfiles:
+    """The built-in limit profiles: mid-field work and wall-side work."""
+
+    profiles = LimitProfiles()
+    limit_module.register_profile(
+        profiles,
+        LimitProfile(
+            profile_id="mid-field",
+            name="场地中间",
+            ranges={axis: AxisRange(-100.0, 100.0) for axis in limit_module.AXES},
+        ),
+    )
+    limit_module.register_profile(
+        profiles,
+        LimitProfile(
+            profile_id="wall-side",
+            name="靠墙作业",
+            ranges={
+                limit_module.AXIS_SLEW: AxisRange(-60.0, 60.0),
+                limit_module.AXIS_TROLLEY: AxisRange(0.0, 80.0),
+                limit_module.AXIS_HOIST: AxisRange(-100.0, 100.0),
+            },
+        ),
+    )
+    return profiles
+
+
 def build_app(data_dir: str = "data", web_root: str = "web") -> App:
     """Create the store, the components and the console for one run."""
 
@@ -77,6 +105,8 @@ def build_app(data_dir: str = "data", web_root: str = "web") -> App:
     hoist = Hoist("crane-1")
     wind = Wind()
     limit = Limit()
+    profiles = default_limit_profiles()
+    limit_module.restore_profiles(profiles, store)
     audit = Audit(1000)
     restore_audit(store, audit)
     feedback = SpeedFeedback("crane-1")
@@ -93,6 +123,7 @@ def build_app(data_dir: str = "data", web_root: str = "web") -> App:
         hoist=hoist,
         wind=wind,
         limit=limit,
+        profiles=profiles,
         audit=audit,
         cranes=cranes,
         feedback=feedback,

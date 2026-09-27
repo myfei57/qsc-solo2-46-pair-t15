@@ -63,6 +63,7 @@ async function refresh() {
     ["制动状态", hoist.brake_engaged ? "抱闸" : "松闸"],
     ["风速", (wind.level || 0).toFixed(1) + " m/s", wind.active ? "danger" : ""],
     ["限位闩锁", limit.latch ? "锁定" : "释放", limit.latch ? "danger" : ""],
+    ["限位分区", limit.profile_name || limit.active_profile || "—"],
     ["最近间距", pair.distance ? pair.distance.toFixed(1) + " 米" : "—", pair.below_safe ? "danger" : ""],
     ["审计记录", data.audit || 0],
   ]);
@@ -154,6 +155,16 @@ $("wind-clear-btn").addEventListener("click", async () => {
 
 $("limit-check-btn").addEventListener("click", async () => {
   await post("/api/limit/check");
+  refresh();
+});
+
+$("limit-wall-btn").addEventListener("click", async () => {
+  await post("/api/limit/activate", { profile: "wall-side" });
+  refresh();
+});
+
+$("limit-field-btn").addEventListener("click", async () => {
+  await post("/api/limit/activate", { profile: "mid-field" });
   refresh();
 });
 
